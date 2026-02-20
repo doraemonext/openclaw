@@ -1,20 +1,46 @@
-FROM node:22-bookworm
+FROM ubuntu:24.04 AS ubuntu-node
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+ARG OPENCLAW_DOCKER_APT_PACKAGES=""
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      bash \
+      ca-certificates \
+      curl \
+      emacs-nox \
+      git \
+      gnupg \
+      htop \
+      openssl \
+      openssh-client \
+      vim \
+      ${OPENCLAW_DOCKER_APT_PACKAGES} && \
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    corepack enable && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+FROM ubuntu-node AS builder
+
+WORKDIR /app
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      python3 \
+      unzip && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
 # Install Bun (required for build scripts)
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
-
-RUN corepack enable
-
-WORKDIR /app
-
-ARG OPENCLAW_DOCKER_APT_PACKAGES=""
-RUN if [ -n "$OPENCLAW_DOCKER_APT_PACKAGES" ]; then \
-      apt-get update && \
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $OPENCLAW_DOCKER_APT_PACKAGES && \
-      apt-get clean && \
-      rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
-    fi
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY ui/package.json ./ui/package.json
@@ -38,18 +64,55 @@ RUN if [ -n "$OPENCLAW_INSTALL_BROWSER" ]; then \
 
 COPY . .
 RUN pnpm build
+
 # Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
 ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm ui:build
 
+# Keep only runtime dependencies and clear package-manager caches.
+RUN CI=true pnpm prune --prod && \
+    pnpm store prune && \
+    rm -rf /root/.local/share/pnpm/store /root/.npm /root/.cache /root/.bun/install/cache
+
+FROM ubuntu-node
+
+WORKDIR /app
+
 ENV NODE_ENV=production
 
 # Allow non-root user to write temp files during runtime/tests.
-RUN chown -R node:node /app
+RUN set -eux; \
+    if getent group node >/dev/null 2>&1; then \
+      groupmod --gid 1001 node; \
+    elif getent group 1001 >/dev/null 2>&1; then \
+      echo "GID 1001 is already in use by another group; cannot create node group" >&2; \
+      exit 1; \
+    else \
+      groupadd --gid 1001 node; \
+    fi; \
+    if id -u node >/dev/null 2>&1; then \
+      usermod --uid 1001 --gid 1001 --home /home/node --shell /bin/bash node; \
+    elif getent passwd 1001 >/dev/null 2>&1; then \
+      echo "UID 1001 is already in use by another user; cannot create node user" >&2; \
+      exit 1; \
+    else \
+      useradd --uid 1001 --gid 1001 --create-home --home-dir /home/node --shell /bin/bash node; \
+    fi; \
+    mkdir -p /home/node /app; \
+    chown -R node:node /home/node /app
+ENV HOME=/home/node
 
-# Security hardening: Run as non-root user
-# The node:22-bookworm image includes a 'node' user (uid 1000)
-# This reduces the attack surface by preventing container escape via root privileges
+COPY --from=builder --chown=node:node /app /app
+
+# Expose CLI on PATH for interactive shells inside containers/pods.
+RUN ln -sf /app/openclaw.mjs /usr/local/bin/openclaw
+
+RUN ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL "https://aliyuncli.alicdn.com/aliyun-cli-linux-latest-${ARCH}.tgz" | \
+    tar -xzf - -C /usr/local/bin/ && \
+    chmod +x /usr/local/bin/aliyun
+
+# Security hardening: Run as non-root user.
 USER node
 
 # Start gateway server with default config.
