@@ -146,7 +146,8 @@ function matchesChannel(
 type NormalizedPeerConstraint =
   | { state: "none" }
   | { state: "invalid" }
-  | { state: "valid"; kind: ChatType; id: string };
+  | { state: "exact"; kind: ChatType; id: string }
+  | { state: "prefix"; kind: ChatType; id: string };
 
 type NormalizedBindingMatch = {
   accountPattern: string;
@@ -230,7 +231,14 @@ function normalizePeerConstraint(
   if (!kind || !id) {
     return { state: "invalid" };
   }
-  return { state: "valid", kind, id };
+  if (id.endsWith("*")) {
+    const prefix = id.slice(0, -1);
+    if (!prefix) {
+      return { state: "invalid" };
+    }
+    return { state: "prefix", kind, id: prefix };
+  }
+  return { state: "exact", kind, id };
 }
 
 function normalizeBindingMatch(
@@ -270,8 +278,17 @@ function matchesBindingScope(match: NormalizedBindingMatch, scope: BindingScope)
   if (match.peer.state === "invalid") {
     return false;
   }
-  if (match.peer.state === "valid") {
+  if (match.peer.state === "exact") {
     if (!scope.peer || scope.peer.kind !== match.peer.kind || scope.peer.id !== match.peer.id) {
+      return false;
+    }
+  }
+  if (match.peer.state === "prefix") {
+    if (
+      !scope.peer ||
+      scope.peer.kind !== match.peer.kind ||
+      !scope.peer.id.startsWith(match.peer.id)
+    ) {
       return false;
     }
   }
@@ -337,6 +354,9 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
     if (value.state === "none") {
       return "none";
     }
+    if (value.state === "exact") {
+      return `${value.kind}:${value.id}`;
+    }
     if (value.state === "invalid") {
       return "invalid";
     }
@@ -373,13 +393,15 @@ export function resolveAgentRoute(input: ResolveAgentRouteInput): ResolvedAgentR
       matchedBy: "binding.peer",
       enabled: Boolean(peer),
       scopePeer: peer,
-      predicate: (candidate) => candidate.match.peer.state === "valid",
+      predicate: (candidate) =>
+        candidate.match.peer.state === "exact" || candidate.match.peer.state === "prefix",
     },
     {
       matchedBy: "binding.peer.parent",
       enabled: Boolean(parentPeer && parentPeer.id),
       scopePeer: parentPeer && parentPeer.id ? parentPeer : null,
-      predicate: (candidate) => candidate.match.peer.state === "valid",
+      predicate: (candidate) =>
+        candidate.match.peer.state === "exact" || candidate.match.peer.state === "prefix",
     },
     {
       matchedBy: "binding.guild+roles",

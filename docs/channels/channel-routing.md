@@ -43,7 +43,7 @@ Examples:
 
 Routing picks **one agent** for each inbound message:
 
-1. **Exact peer match** (`bindings` with `peer.kind` + `peer.id`).
+1. **Peer match** (`bindings` with `peer.kind` + `peer.id`; support exact match and suffix wildcard prefix match like `122592:sid:*`).
 2. **Parent peer match** (thread inheritance).
 3. **Guild + roles match** (Discord) via `guildId` + `roles`.
 4. **Guild match** (Discord) via `guildId`.

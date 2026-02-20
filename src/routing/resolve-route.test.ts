@@ -108,6 +108,49 @@ describe("resolveAgentRoute", () => {
     expect(route.matchedBy).toBe("binding.peer");
   });
 
+  test("peer binding supports suffix wildcard (*) for peer.id prefix matching", () => {
+    const cfg: OpenClawConfig = {
+      bindings: [
+        {
+          agentId: "wild",
+          match: {
+            channel: "dingtalk",
+            peer: { kind: "direct", id: "122592:sid:*" },
+          },
+        },
+      ],
+    };
+    const route = resolveAgentRoute({
+      cfg,
+      channel: "dingtalk",
+      accountId: null,
+      peer: { kind: "direct", id: "122592:sid:7b6393b2-0d85-4013-9312-d76ecd304f4b" },
+    });
+    expect(route.agentId).toBe("wild");
+    expect(route.matchedBy).toBe("binding.peer");
+  });
+
+  test("peer wildcard does not match different prefix", () => {
+    const cfg: OpenClawConfig = {
+      bindings: [
+        {
+          agentId: "wild",
+          match: {
+            channel: "dingtalk",
+            peer: { kind: "direct", id: "122592:sid:*" },
+          },
+        },
+      ],
+    };
+    const route = resolveAgentRoute({
+      cfg,
+      channel: "dingtalk",
+      accountId: null,
+      peer: { kind: "direct", id: "199999:sid:7b6393b2-0d85-4013-9312-d76ecd304f4b" },
+    });
+    expect(route.agentId).toBe("main");
+  });
+
   test("discord channel peer binding wins over guild binding", () => {
     const cfg: OpenClawConfig = {
       bindings: [
