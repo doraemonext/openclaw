@@ -10,6 +10,7 @@ ARG OPENCLAW_DOCKER_APT_PACKAGES=""
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       bash \
+      build-essential \
       ca-certificates \
       curl \
       emacs-nox \
@@ -18,6 +19,7 @@ RUN apt-get update && \
       htop \
       openssl \
       openssh-client \
+      python3 \
       vim \
       ${OPENCLAW_DOCKER_APT_PACKAGES} && \
     curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
