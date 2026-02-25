@@ -50,8 +50,8 @@ function makeRun(overrides: Partial<FollowupRun["run"]> = {}): FollowupRun["run"
 
 describe("agent-runner-utils", () => {
   beforeEach(() => {
-    hoisted.resolveAgentModelFallbacksOverrideMock.mockReset();
-    hoisted.resolveAgentIdFromSessionKeyMock.mockReset();
+    hoisted.resolveAgentModelFallbacksOverrideMock.mockClear();
+    hoisted.resolveAgentIdFromSessionKeyMock.mockClear();
   });
 
   it("resolves model fallback options from run context", () => {
@@ -148,5 +148,23 @@ describe("agent-runner-utils", () => {
       senderUsername: undefined,
       senderE164: undefined,
     });
+  });
+
+  it("prefers OriginatingChannel over Provider for messageProvider", () => {
+    const run = makeRun();
+
+    const resolved = buildEmbeddedRunContexts({
+      run,
+      sessionCtx: {
+        Provider: "heartbeat",
+        OriginatingChannel: "Telegram",
+        OriginatingTo: "268300329",
+      },
+      hasRepliedRef: undefined,
+      provider: "openai",
+    });
+
+    expect(resolved.embeddedContext.messageProvider).toBe("telegram");
+    expect(resolved.embeddedContext.messageTo).toBe("268300329");
   });
 });
