@@ -11,6 +11,7 @@ import {
 } from "./live-auth-keys.js";
 import { isModernModelRef } from "./live-model-filter.js";
 import { getApiKeyForModel, requireApiKey } from "./model-auth.js";
+import { shouldSuppressBuiltInModel } from "./model-suppression.js";
 import { ensureOpenClawModelsJson } from "./models-config.js";
 import { isRateLimitErrorMessage } from "./pi-embedded-helpers/errors.js";
 import { discoverAuthStorage, discoverModels } from "./pi-model-discovery.js";
@@ -45,6 +46,23 @@ function logProgress(message: string): void {
   console.log(`[live] ${message}`);
 }
 
+function formatFailurePreview(
+  failures: Array<{ model: string; error: string }>,
+  maxItems: number,
+): string {
+  const limit = Math.max(1, maxItems);
+  const lines = failures.slice(0, limit).map((failure, index) => {
+    const normalized = failure.error.replace(/\s+/g, " ").trim();
+    const clipped = normalized.length > 320 ? `${normalized.slice(0, 317)}...` : normalized;
+    return `${index + 1}. ${failure.model}: ${clipped}`;
+  });
+  const remaining = failures.length - limit;
+  if (remaining > 0) {
+    lines.push(`... and ${remaining} more`);
+  }
+  return lines.join("\n");
+}
+
 function isGoogleModelNotFoundError(err: unknown): boolean {
   const msg = String(err);
   if (!/not found/i.test(msg)) {
@@ -70,17 +88,29 @@ function isModelNotFoundErrorMessage(raw: string): boolean {
   if (!msg) {
     return false;
   }
-  if (/\b404\b/.test(msg) && /not[_-]?found/i.test(msg)) {
+  if (/\b404\b/.test(msg) && /not(?:[\s_-]+)?found/i.test(msg)) {
     return true;
   }
   if (/not_found_error/i.test(msg)) {
     return true;
   }
-  if (/model:\s*[a-z0-9._-]+/i.test(msg) && /not[_-]?found/i.test(msg)) {
+  if (/model:\s*[a-z0-9._-]+/i.test(msg) && /not(?:[\s_-]+)?found/i.test(msg)) {
     return true;
   }
   return false;
 }
+
+describe("isModelNotFoundErrorMessage", () => {
+  it("matches whitespace-separated not found errors", () => {
+    expect(isModelNotFoundErrorMessage("404 model not found")).toBe(true);
+    expect(isModelNotFoundErrorMessage("model: minimax-text-01 not found")).toBe(true);
+  });
+
+  it("still matches underscore and hyphen variants", () => {
+    expect(isModelNotFoundErrorMessage("404 model not_found")).toBe(true);
+    expect(isModelNotFoundErrorMessage("404 model not-found")).toBe(true);
+  });
+});
 
 function isChatGPTUsageLimitErrorMessage(raw: string): boolean {
   const msg = raw.toLowerCase();
@@ -93,6 +123,16 @@ function isInstructionsRequiredError(raw: string): boolean {
 
 function isModelTimeoutError(raw: string): boolean {
   return /model call timed out after \d+ms/i.test(raw);
+}
+
+function isProviderUnavailableErrorMessage(raw: string): boolean {
+  const msg = raw.toLowerCase();
+  return (
+    msg.includes("no allowed providers are available") ||
+    msg.includes("provider unavailable") ||
+    msg.includes("upstream provider unavailable") ||
+    msg.includes("upstream error from google")
+  );
 }
 
 function toInt(value: string | undefined, fallback: number): number {
@@ -163,6 +203,31 @@ function resolveTestReasoning(
   return "low";
 }
 
+function resolveLiveSystemPrompt(model: Model<Api>): string | undefined {
+  if (model.provider === "openai-codex") {
+    return "You are a concise assistant. Follow the user's instruction exactly.";
+  }
+  return undefined;
+}
+
+describe("resolveLiveSystemPrompt", () => {
+  it("adds instructions for openai-codex probes", () => {
+    expect(
+      resolveLiveSystemPrompt({
+        provider: "openai-codex",
+      } as Model<Api>),
+    ).toContain("Follow the user's instruction exactly.");
+  });
+
+  it("keeps other providers unchanged", () => {
+    expect(
+      resolveLiveSystemPrompt({
+        provider: "openai",
+      } as Model<Api>),
+    ).toBeUndefined();
+  });
+});
+
 async function completeSimpleWithTimeout<TApi extends Api>(
   model: Model<TApi>,
   context: Parameters<typeof completeSimple<TApi>>[1],
@@ -207,6 +272,7 @@ async function completeOkWithRetry(params: {
     const res = await completeSimpleWithTimeout(
       params.model,
       {
+        systemPrompt: resolveLiveSystemPrompt(params.model),
         messages: [
           {
             role: "user",
@@ -278,6 +344,9 @@ describeLive("live models (profile keys)", () => {
       }> = [];
 
       for (const model of models) {
+        if (shouldSuppressBuiltInModel({ provider: model.provider, id: model.id })) {
+          continue;
+        }
         if (providers && !providers.has(model.provider)) {
           continue;
         }
@@ -469,7 +538,10 @@ describeLive("live models (profile keys)", () => {
               throw new Error(msg || "model returned error with no message");
             }
 
-            if (ok.text.length === 0 && model.provider === "google") {
+            if (
+              ok.text.length === 0 &&
+              (model.provider === "google" || model.provider === "google-gemini-cli")
+            ) {
               skipped.push({
                 model: id,
                 reason: "no text returned (likely unavailable model id)",
@@ -479,7 +551,9 @@ describeLive("live models (profile keys)", () => {
             }
             if (
               ok.text.length === 0 &&
-              (model.provider === "openrouter" || model.provider === "opencode")
+              (model.provider === "openrouter" ||
+                model.provider === "opencode" ||
+                model.provider === "opencode-go")
             ) {
               skipped.push({
                 model: id,
@@ -562,7 +636,7 @@ describeLive("live models (profile keys)", () => {
             }
             if (
               allowNotFoundSkip &&
-              model.provider === "opencode" &&
+              (model.provider === "opencode" || model.provider === "opencode-go") &&
               isRateLimitErrorMessage(message)
             ) {
               skipped.push({ model: id, reason: message });
@@ -592,6 +666,11 @@ describeLive("live models (profile keys)", () => {
               logProgress(`${progressLabel}: skip (timeout)`);
               break;
             }
+            if (allowNotFoundSkip && isProviderUnavailableErrorMessage(message)) {
+              skipped.push({ model: id, reason: message });
+              logProgress(`${progressLabel}: skip (provider unavailable)`);
+              break;
+            }
             logProgress(`${progressLabel}: failed`);
             failures.push({ model: id, error: message });
             break;
@@ -600,11 +679,10 @@ describeLive("live models (profile keys)", () => {
       }
 
       if (failures.length > 0) {
-        const preview = failures
-          .slice(0, 10)
-          .map((f) => `- ${f.model}: ${f.error}`)
-          .join("\n");
-        throw new Error(`live model failures (${failures.length}):\n${preview}`);
+        const preview = formatFailurePreview(failures, 20);
+        throw new Error(
+          `live model failures (${failures.length}, showing ${Math.min(failures.length, 20)}):\n${preview}`,
+        );
       }
 
       void skipped;
